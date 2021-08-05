@@ -21,12 +21,13 @@
         {% endif %}
         <a href="{{ url_for('logout', username=username) }}" class="btn btn-sm btn-secondary">Logout</a>
         {% if is_admin and not restarting %}
-          <a href="/restart" class="btn btn-sm btn-danger">Restart server</a>
+          <a href="/restart" class="btn btn-sm btn-danger">Restart</a>
         {% elif is_admin %}
           <a href="/cancelrestart" class="btn btn-sm btn-danger">Cancel restart</a>
         {% endif %}
         {% if is_admin %}
           <a href="/reloadbots" class="btn btn-sm btn-warning">Reload bots</a>
+          <a href="/signup" class="btn btn-sm btn-success">Signup</a>
         {% endif %}
       </div>
     </div>

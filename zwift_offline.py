@@ -350,8 +350,9 @@ def jwt_to_session_cookie(f):
 
 
 @app.route("/signup/", methods=["GET", "POST"])
+@login_required
 def signup():
-    if request.method == "POST":
+    if request.method == "POST" and bool(current_user.is_admin):
         username = request.form['username']
         password = request.form['password']
         confirm_password = request.form['confirm_password']
@@ -380,7 +381,6 @@ def signup():
             return redirect(url_for('signup'))
 
         flash("User account has been created.")
-        return redirect(url_for("login"))
 
     return render_template("signup.html")
 
