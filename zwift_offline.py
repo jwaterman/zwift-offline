@@ -44,6 +44,7 @@ import protobuf.world_pb2 as world_pb2
 import protobuf.zfiles_pb2 as zfiles_pb2
 import protobuf.hash_seeds_pb2 as hash_seeds_pb2
 import protobuf.events_pb2 as events_pb2
+import protobuf.variants_pb2 as variants_pb2
 import online_sync
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
@@ -201,6 +202,7 @@ class PartialProfile:
     first_name = ''
     last_name = ''
     country_code = 0
+    route = 0
 
 class Online:
     total = 0
@@ -297,6 +299,10 @@ def get_partial_profile(player_id):
                     partial_profile.first_name = profile.first_name
                     partial_profile.last_name = profile.last_name
                     partial_profile.country_code = profile.country_code
+                    for f in profile.f114:
+                        if f.id == 1766985504 or f.id == 3273955058:
+                            partial_profile.route = f.number_value
+                            break
                     player_partial_profiles[player_id] = partial_profile
             except:
                 return None
@@ -401,6 +407,13 @@ def login():
             login_user(user, remember=True)
             user.remember = remember
             db.session.commit()
+            profile_dir = os.path.join(STORAGE_DIR, str(user.player_id))
+            try:
+                if not os.path.isdir(profile_dir):
+                    os.makedirs(profile_dir)
+            except IOError as e:
+                logger.error("failed to create profile dir (%s):  %s", profile_dir, str(e))
+                return '', 500
             return redirect(url_for("user_home", username=username, enable_ghosts=bool(user.enable_ghosts), online=get_online()))
         else:
             flash("Invalid username or password.")
@@ -484,7 +497,7 @@ def strava():
         return redirect('/user/%s/' % current_user.username)
     client = Client()
     url = client.authorization_url(client_id=client_id,
-                                   redirect_uri='https://%s/authorization' % server_ip,
+                                   redirect_uri='https://launcher.zwift.com/authorization',
                                    scope='activity:write')
     return redirect(url)
 
@@ -497,7 +510,7 @@ def authorization():
         client = Client()
         code = request.args.get('code')
         token_response = client.exchange_code_for_token(client_id=client_id, client_secret=client_secret, code=code)
-        with open('%s/strava_token.txt' % os.path.join(STORAGE_DIR, str(current_user.player_id)), 'w') as f:
+        with open(os.path.join(STORAGE_DIR, str(current_user.player_id), 'strava_token.txt'), 'w') as f:
             f.write(client_id + '\n');
             f.write(client_secret + '\n');
             f.write(token_response['access_token'] + '\n');
@@ -520,8 +533,7 @@ def profile(username):
 
         username = request.form['username']
         password = request.form['password']
-        player_id = current_user.player_id
-        profile_dir = '%s/%s' % (STORAGE_DIR, str(player_id))
+        profile_dir = os.path.join(STORAGE_DIR, str(current_user.player_id))
         session = requests.session()
 
         try:
@@ -556,6 +568,35 @@ def profile(username):
     return render_template("profile.html", username=current_user.username)
 
 
+@app.route("/garmin/<username>/", methods=["GET", "POST"])
+@login_required
+def garmin(username):
+    if request.method == "POST":
+        if request.form['username'] == "" or request.form['password'] == "":
+            flash("Garmin credentials can't be empty.")
+            return render_template("garmin.html", username=current_user.username)
+
+        username = request.form['username']
+        password = request.form['password']
+
+        try:
+            file_path = os.path.join(STORAGE_DIR, str(current_user.player_id), 'garmin_credentials.txt')
+            with open(file_path, 'w') as f:
+                f.write(username + '\n');
+                f.write(password + '\n');
+            if credentials_key is not None:
+                with open(file_path, 'rb') as fr:
+                    garmin_credentials = fr.read()
+                    cipher_suite = Fernet(credentials_key)
+                    ciphered_text = cipher_suite.encrypt(garmin_credentials)
+                    with open(file_path, 'wb') as fw:
+                        fw.write(ciphered_text)
+            flash("Garmin credentials saved.")
+        except:
+            flash("Error saving 'garmin_credentials.txt' file.")
+    return render_template("garmin.html", username=current_user.username)
+
+
 @app.route("/user/<username>/")
 @login_required
 def user_home(username):
@@ -570,7 +611,7 @@ def send_message_to_all_online(message, sender='Server'):
     player_update.world_time1 = world_time()
     player_update.world_time2 = world_time() + 60000
     player_update.f12 = 1
-    player_update.f14 = int(str(int(get_utc_time()*1000000)))
+    player_update.f14 = int(get_utc_time()*1000000)
 
     chat_message = udp_node_msgs_pb2.ChatMessage()
     chat_message.rider_id = 0
@@ -644,14 +685,7 @@ def reload_bots():
 @app.route("/upload/<username>/", methods=["GET", "POST"])
 @login_required
 def upload(username):
-    player_id = current_user.player_id
-    profile_dir = os.path.join(STORAGE_DIR, str(player_id))
-    try:
-        if not os.path.isdir(profile_dir):
-            os.makedirs(profile_dir)
-    except IOError as e:
-        logger.error("failed to create profile dir (%s):  %s", profile_dir, str(e))
-        return '', 500
+    profile_dir = os.path.join(STORAGE_DIR, str(current_user.player_id))
 
     if request.method == 'POST':
         uploaded_file = request.files['file']
@@ -1272,7 +1306,7 @@ def zwift_upload(player_id, activity):
 
 # With 64 bit ids Zwift can pass negative numbers due to overflow, which the flask int
 # converter does not handle so it's a string argument
-@app.route('/api/profiles/<int:player_id>/activities/<string:activity_id>', methods=['PUT'])
+@app.route('/api/profiles/<int:player_id>/activities/<string:activity_id>', methods=['PUT', 'DELETE'])
 @jwt_to_session_cookie
 @login_required
 def api_profiles_activities_id(player_id, activity_id):
@@ -1280,6 +1314,8 @@ def api_profiles_activities_id(player_id, activity_id):
         return '', 400
     if current_user.player_id != player_id:
         return '', 401
+    if request.method == 'DELETE':
+        return 'true', 200
     activity_id = int(activity_id) & 0xffffffffffffffff
     activity = activity_pb2.Activity()
     activity.ParseFromString(request.stream.read())
@@ -1451,6 +1487,7 @@ def api_profiles_goals_id(player_id, goal_id):
 
 
 @app.route('/api/tcp-config', methods=['GET'])
+@app.route('/relay/tcp-config', methods=['GET'])
 def api_tcp_config():
     infos = periodic_info_pb2.PeriodicInfos()
     info = infos.infos.add()
@@ -1477,16 +1514,13 @@ def add_player_to_world(player, course_world, is_pace_partner):
             online_player.lastName = partial_profile.last_name
             online_player.distance = player.distance
             online_player.time = player.time
-            online_player.f6 = 840#0
+            online_player.f6 = partial_profile.country_code
             online_player.f8 = player.sport
-            online_player.f9 = 0
-            online_player.f10 = 0
-            online_player.f11 = 0
             online_player.power = player.power
-            online_player.f13 = 2355
             online_player.x = player.x
             online_player.altitude = player.altitude
             online_player.y = player.y
+            online_player.route = partial_profile.route
             course_world[course_id].f5 += 1
 
 
@@ -1521,7 +1555,7 @@ def relay_worlds_generic(world_id=None):
             #PlayerUpdate
             player_update.world_time2 = world_time() + 60000
             player_update.f12 = 1
-            player_update.f14 = int(str(int(get_utc_time()*1000000)))
+            player_update.f14 = int(get_utc_time()*1000000)
             for recieving_player_id in online.keys():
                 should_receive = False
                 if player_update.type == 5 or player_update.type == 105:
@@ -1613,7 +1647,10 @@ def relay_worlds_id_players_id(world_id, player_id):
         return player.SerializeToString()
     if player_id in global_pace_partners.keys():
         pace_partner = global_pace_partners[player_id]
-        return pace_partner.route.states[pace_partner.position].SerializeToString()
+        state = pace_partner.route.states[pace_partner.position]
+        state.world = get_course(state)
+        state.route = get_partial_profile(player_id).route
+        return state.SerializeToString()
     if player_id in global_bots.keys():
         bot = global_bots[player_id]
         return bot.route.states[bot.position].SerializeToString()
@@ -1638,12 +1675,62 @@ def relay_worlds_hash_seeds():
 
 # XXX: attributes have not been thoroughly investigated
 @app.route('/relay/worlds/<int:world_id>/attributes', methods=['POST'])
-def relay_worlds_attributes(world_id):
+def relay_worlds_id_attributes(world_id):
 # NOTE: This was previously a protobuf message in Zwift client, but later changed.
 #    attribs = world_pb2.WorldAttributes()
 #    attribs.world_time = world_time()
 #    return attribs.SerializeToString(), 200
     return relay_worlds_generic(world_id)
+
+
+@app.route('/relay/worlds/attributes', methods=['POST'])
+def relay_worlds_attributes():
+# PlayerUpdate was previously a json request handled in relay_worlds_generic()
+# now it's protobuf posted to this new route (at least in Windows client)
+    player_update = udp_node_msgs_pb2.PlayerUpdate()
+    try:
+        player_update.ParseFromString(request.data)
+    except:
+        return '', 422
+
+    player_update.world_time2 = world_time() + 60000
+    player_update.f12 = 1
+    player_update.f14 = int(get_utc_time() * 1000000)
+    for receiving_player_id in online.keys():
+        should_receive = False
+        if player_update.type in [5, 105]:
+            receiving_player = online[receiving_player_id]
+            # Chat message
+            if player_update.type == 5:
+                chat_message = udp_node_msgs_pb2.ChatMessage()
+                chat_message.ParseFromString(player_update.payload)
+                sending_player_id = chat_message.rider_id
+                if sending_player_id in online:
+                    sending_player = online[sending_player_id]
+                    if is_nearby(sending_player, receiving_player):
+                        should_receive = True
+            # Segment complete
+            else:
+                segment_complete = udp_node_msgs_pb2.SegmentComplete()
+                segment_complete.ParseFromString(player_update.payload)
+                sending_player_id = segment_complete.rider_id
+                if sending_player_id in online:
+                    sending_player = online[sending_player_id]
+                    if get_course(sending_player) == get_course(receiving_player) or receiving_player.watchingRiderId == sending_player_id:
+                        should_receive = True
+        # Other PlayerUpdate, send to all
+        else:
+            should_receive = True
+        if should_receive:
+            if not receiving_player_id in player_update_queue:
+                player_update_queue[receiving_player_id] = list()
+            player_update_queue[receiving_player_id].append(player_update.SerializeToString())
+    # If it's a chat message, send to Discord
+    if player_update.type == 5:
+        chat_message = udp_node_msgs_pb2.ChatMessage()
+        chat_message.ParseFromString(player_update.payload)
+        discord.send_message(chat_message.message, chat_message.rider_id)
+    return '', 201
 
 
 @app.route('/relay/periodic-info', methods=['GET'])
@@ -1739,6 +1826,11 @@ def api_segment_results():
     if request.method == 'POST' and player_id != current_user.player_id:
         return '', 401
     return handle_segment_results(request)
+
+
+@app.route('/live-segment-results-service/leaders', methods=['GET'])
+def live_segment_results_service_leaders():
+    return '', 200
 
 
 @app.route('/relay/worlds/<int:world_id>/leave', methods=['POST'])
@@ -1982,6 +2074,71 @@ def auth_realms_zwift_tokens_access_codes():
         return fake_jwt_with_session_cookie(remember_token), 200
     else:
         return FAKE_JWT, 200
+
+
+@app.route('/experimentation/v1/variant', methods=['POST'])
+def experimentation_v1_variant():
+    variant_list = [('game_1_12_pc_skip_activity_save_retry', None, None),
+                    ('return_to_home', 1, None),
+                    ('game_1_12_nhd_v1', 1, None),
+                    ('game_1_13_japanese_medium_font', 1, None),
+                    ('game_1_12_1_retire_client_chat_culling', 1, None),
+                    ('game_1_14_draftlock_fix', None, None),
+                    ('xplatform_partner_connection_vitality', None, None),
+                    ('game_1_16_new_route_ui', 1, None),
+                    ('pack_dynamics_30_global', 1, None),
+                    ('pack_dynamics_30_makuri', 1, None),
+                    ('pack_dynamics_30_london', 1, None),
+                    ('pack_dynamics_30_watopia', 1, None),
+                    ('pack_dynamics_30_exclude_events', None, None),
+                    #('game_1_19_system_alerts', 1, None),
+                    ('game_1_16_2_ble_alternate_unpair_all_paired_devices', 1, None),
+                    ('game_1_17_game_client_activity_event', None, None),
+                    ('game_1_17_1_tdf_femmes_yellow_jersey', None, None),
+                    ('game_1_17_ble_disable_component_sport_filter', 1, None),
+                    ('game_1_18_new_welcome_ride', None, None),
+                    ('game_1_19_achievement_service_persist', 1, None),
+                    ('game_1_19_achievement_service_src_of_truth', None, None),
+                    ('game_1_18_0_pack_dynamics_2_5_collision_push_back_removal', 1, None),
+                    ('game_1_18_alternate_control_point_pairing', None, None),
+                    ('game_1_18_swap_legacy_controllable_for_ftms', None, None),
+                    ('game_1_19_gender_dob_change', None, None),
+                    ('game_1_18_0_osx_monterey_bluetooth_uart_fix', None, 0),
+                    ('game_1_19_0_default_rubberbanding', None, None),
+                    ('game_1_19_use_tabbed_settings', None, 0),
+                    ('pedal_assist_20', None, None),
+                    ('game_1_19_segment_results_sub_active', 1, 0),
+                    ('game_1_19_0_alternate_ble_dll', None, None),
+                    ('game_1_20_hw_experiment_1', None, None),
+                    ('game_1_19_paired_devices_alerts', 1, None),
+                    ('game_1_19_real_time_unlocks', None, None),
+                    ('game_1_20_apple_novus_ble_refactor', None, None),
+                    ('game_1_20_0_ble_data_guard', 1, None),
+                    ('game_1_20_disable_high_volume_send_mixpanel', None, None),
+                    ('game_1_20_steering_mode_cleanup', None, None),
+                    ('game_1_20_clickable_telemetry_box', None, None),
+                    ('game_1_20_0_enable_stages_steering', None, 0),
+                    ('game_1_15_assert_disable_abort', 1, None),
+                    ('game_1_19_local_activity_persistence', 1, None),
+                    ('game_1_18_holiday_mode', None, None),
+                    ('game_1_17_noesis_enabled', None, None),
+                    ('game_1_20_home_screen', None, None),
+                    ('game_1_19_noesis_dummy', None, None),
+                    ('game_1_14_settings_refactor', None, None)]
+
+    variants = variants_pb2.Variants()
+    for variant in variant_list:
+        item = variants.variants.add()
+        item.name = variant[0]
+        if variant[1] is not None:
+            item.value = variant[1]
+        f3 = item.f3.add()
+        if variant[2] is not None:
+            f1 = f3.f1.add()
+            f1.name = variant[0]
+            f2 = f1.f2.add()
+            f2.f4 = variant[2]
+    return variants.SerializeToString(), 200
 
 
 def run_standalone(passed_online, passed_global_pace_partners, passed_global_bots, passed_global_ghosts, passed_ghosts_enabled, passed_save_ghost, passed_player_update_queue, passed_discord):

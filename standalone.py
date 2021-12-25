@@ -9,7 +9,7 @@ import time
 import csv
 import math
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from shutil import copyfile
 if sys.version_info[0] > 2:
     import socketserver
@@ -202,7 +202,8 @@ class CDNHandler(SimpleHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header('Content-type', 'text/xml')
                     self.end_headers()
-                    output = '<MapSchedule><appointments><appointment map="%s" start="%s"/></appointments><VERSION>1</VERSION></MapSchedule>' % (override[1], datetime.now().strftime("%Y-%m-%dT00:01-04"))
+                    start = datetime.today() - timedelta(days=1)
+                    output = '<MapSchedule><appointments><appointment map="%s" start="%s"/></appointments><VERSION>1</VERSION></MapSchedule>' % (override[1], start.strftime("%Y-%m-%dT00:01-04"))
                     self.wfile.write(output.encode())
                     MAP_OVERRIDE.remove(override)
                     return
@@ -249,7 +250,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
         self.data = self.request.recv(1024)
         hello = tcp_node_msgs_pb2.TCPHello()
         try:
-            hello.ParseFromString(self.data[3:-4])
+            hello.ParseFromString(self.data[4:-4])
         except:
             return
         # send packet containing UDP server (127.0.0.1)
